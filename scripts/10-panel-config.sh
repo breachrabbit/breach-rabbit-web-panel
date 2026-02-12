@@ -1,287 +1,176 @@
 #!/bin/bash
 set -e
 
-PANEL_API_KEY=$1
-JWT_SECRET=$2
-PANEL_SECRET=$3
-DB_PASSWORD=$4
-REDIS_PASSWORD=$5
+DB_PASS=$1
+REDIS_PASS=$2
+JWT_SECRET=$3
+PANEL_KEY=$4
 
-echo "Configuring Panel environment..."
+echo "Configuring panel environment (SAFE MODE)..."
 
-# Create .env file
-cat > /opt/panel/backend/.env <<EOF
-# ============================================================================
-# Breach Rabbit Web Panel - Environment Configuration
-# ============================================================================
+cd /opt/panel/backend
 
-# Database Configuration
-DATABASE_URL="mysql://panel_user:${DB_PASSWORD}@localhost:3306/panel_db"
+# Создать ecosystem.config.js с лимитами памяти
+cat > ecosystem.config.js <<'EOF'
+module.exports = {
+  apps: [{
+    name: 'breach-rabbit-panel',
+    cwd: '/opt/panel/backend',
+    script: 'node_modules/next/dist/bin/next',
+    args: 'start',
+    instances: 1,
+    autorestart: true,
+    max_memory_restart: '400M',  // КРИТИЧЕСКИ ВАЖНО для 2GB RAM
+    env: {
+      NODE_ENV: 'production',
+      PORT: '3000',
+      NODE_OPTIONS: '--max-old-space-size=300'  // Лимит памяти для Node.js
+    },
+    error_file: '/var/log/panel/error.log',
+    out_file: '/var/log/panel/out.log',
+    watch: false,
+    min_uptime: '15000',
+    max_restarts: 3,
+    restart_delay: 5000
+  }]
+};
+EOF
+
+chown panel:panel ecosystem.config.js
+
+# Создать .env
+cat > .env <<EOF
+DATABASE_URL="mysql://panel_user:${DB_PASS}@localhost:3306/panel_db"
 DATABASE_HOST=localhost
 DATABASE_PORT=3306
 DATABASE_NAME=panel_db
 DATABASE_USER=panel_user
-DATABASE_PASSWORD=${DB_PASSWORD}
-
-# Next.js Configuration
+DATABASE_PASSWORD=${DB_PASS}
 NEXT_PUBLIC_API_URL=http://localhost:3000
 NODE_ENV=production
 PORT=3000
-
-# Security & Authentication
 JWT_SECRET=${JWT_SECRET}
-PANEL_SECRET_KEY=${PANEL_SECRET}
-SESSION_SECRET=${PANEL_SECRET}
-
-# OLS API Configuration
+PANEL_SECRET_KEY=$(openssl rand -hex 32)
+SESSION_SECRET=$(openssl rand -hex 32)
 OLS_API_URL=https://localhost:7080/rest/v1
-OLS_API_KEY=${PANEL_API_KEY}
+OLS_API_KEY=${PANEL_KEY}
 OLS_ADMIN_USER=admin
-
-# Redis Configuration
 REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_PASSWORD=${REDIS_PASSWORD}
-
-# File Paths
+REDIS_PASSWORD=${REDIS_PASS}
 SITES_PATH=/var/www/sites
 BACKUP_PATH=/opt/panel/backups
 LOG_PATH=/var/log/panel
-TEMP_PATH=/tmp/panel
-
-# SSL Configuration
 ACME_HOME=/home/panel/.acme.sh
 SSL_PATH=/etc/panel/ssl
-SSL_AUTO_RENEW=true
-SSL_RENEW_DAYS=30
-
-# Aeza API (Optional)
-AEZA_API_KEY=
-AEZA_API_URL=https://api.aeza.net/v1
-
-# Backup Configuration
-BACKUP_RETENTION_DAYS=30
-BACKUP_SCHEDULE="0 2 * * *"
-BACKUP_COMPRESSION=true
-
-# Monitoring
-ENABLE_MONITORING=true
-MONITORING_INTERVAL=60
-
-# Feature Flags
-ENABLE_FILE_MANAGER=true
-ENABLE_TERMINAL=true
-ENABLE_CRON_MANAGER=true
-ENABLE_FIREWALL_GUI=true
-ENABLE_REDIS=true
-
-# Performance
-MAX_UPLOAD_SIZE=64MB
-REQUEST_TIMEOUT=30000
 EOF
 
-chown panel:panel /opt/panel/backend/.env
-chmod 600 /opt/panel/backend/.env
+chown panel:panel .env
+chmod 600 .env
 
-# Create PM2 ecosystem config
-cat > /opt/panel/ecosystem.config.js <<EOF
-module.exports = {
-  apps: [
-    {
-      name: 'breach-rabbit-panel',
-      cwd: '/opt/panel/backend',
-      script: 'node_modules/next/dist/bin/next',
-      args: 'start',
-      instances: 1,
-      autorestart: true,
-      watch: false,
-      max_memory_restart: '512M',
-      env: {
-        NODE_ENV: 'production',
-        PORT: 3000
-      },
-      error_file: '/var/log/panel/panel-error.log',
-      out_file: '/var/log/panel/panel-out.log',
-      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      merge_logs: true,
-      time: true,
-      min_uptime: '10s',
-      max_restarts: 10,
-      restart_delay: 4000
-    }
-  ]
-};
-EOF
-
-chown panel:panel /opt/panel/ecosystem.config.js
-
-# Create systemd service for panel (alternative to PM2)
-cat > /etc/systemd/system/breach-rabbit-panel.service <<'EOF'
-[Unit]
-Description=Breach Rabbit Web Panel
-After=network.target mysql.service redis-server.service
-
-[Service]
-Type=simple
-User=panel
-Group=www-data
-WorkingDirectory=/opt/panel/backend
-Environment="NODE_ENV=production"
-Environment="PORT=3000"
-ExecStart=/usr/bin/node /opt/panel/backend/node_modules/next/dist/bin/next start
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=breach-rabbit-panel
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create panel database schema
-echo "Creating panel database schema..."
-mysql -u panel_user -p"${DB_PASSWORD}" panel_db <<'EOF'
--- Users table
+# Создать схему БД
+mysql -u panel_user -p"${DB_PASS}" panel_db <<'EOF'
 CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(50) UNIQUE NOT NULL,
   email VARCHAR(100) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  role ENUM('admin', 'user') DEFAULT 'user',
+  role ENUM('admin','user') DEFAULT 'user',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  last_login TIMESTAMP NULL,
   is_active BOOLEAN DEFAULT true
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Websites table
 CREATE TABLE IF NOT EXISTS websites (
   id INT AUTO_INCREMENT PRIMARY KEY,
   domain VARCHAR(255) UNIQUE NOT NULL,
   root_path VARCHAR(512) NOT NULL,
   php_version VARCHAR(10) DEFAULT '8.3',
-  type ENUM('static', 'php', 'proxy') DEFAULT 'php',
-  proxy_target VARCHAR(512),
+  type ENUM('static','php','proxy') DEFAULT 'php',
   ssl_enabled BOOLEAN DEFAULT false,
-  ssl_cert_path VARCHAR(512),
-  ssl_key_path VARCHAR(512),
   ssl_expires_at DATETIME,
-  auto_renew_ssl BOOLEAN DEFAULT true,
-  status ENUM('active', 'suspended', 'deleted') DEFAULT 'active',
+  status ENUM('active','suspended','deleted') DEFAULT 'active',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_domain (domain),
   INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- SSL Certificates table
 CREATE TABLE IF NOT EXISTS ssl_certificates (
   id INT AUTO_INCREMENT PRIMARY KEY,
   domain VARCHAR(255) NOT NULL,
-  cert_path VARCHAR(512) NOT NULL,
-  key_path VARCHAR(512) NOT NULL,
-  fullchain_path VARCHAR(512),
-  issuer VARCHAR(100),
+  cert_path VARCHAR(512),
+  key_path VARCHAR(512),
   expires_at DATETIME NOT NULL,
   auto_renew BOOLEAN DEFAULT true,
-  last_renewed_at TIMESTAMP NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY unique_domain (domain),
   INDEX idx_expires (expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Databases table
 CREATE TABLE IF NOT EXISTS databases (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) UNIQUE NOT NULL,
   user VARCHAR(100) NOT NULL,
   password VARCHAR(255) NOT NULL,
   host VARCHAR(100) DEFAULT 'localhost',
-  type ENUM('mysql', 'mariadb', 'postgresql') DEFAULT 'mariadb',
-  size_mb DECIMAL(10,2) DEFAULT 0,
+  type ENUM('mysql','mariadb','postgresql') DEFAULT 'mariadb',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Backups table
-CREATE TABLE IF NOT EXISTS backups (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  website_id INT,
-  type ENUM('full', 'database', 'files') NOT NULL,
-  path VARCHAR(512) NOT NULL,
-  size_mb DECIMAL(10,2),
-  status ENUM('pending', 'running', 'completed', 'failed') DEFAULT 'pending',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  completed_at TIMESTAMP NULL,
-  FOREIGN KEY (website_id) REFERENCES websites(id) ON DELETE CASCADE,
-  INDEX idx_status (status),
-  INDEX idx_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Cron jobs table
-CREATE TABLE IF NOT EXISTS cron_jobs (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  command TEXT NOT NULL,
-  schedule VARCHAR(100) NOT NULL,
-  user VARCHAR(50) DEFAULT 'www-data',
-  description VARCHAR(255),
-  enabled BOOLEAN DEFAULT true,
-  last_run TIMESTAMP NULL,
-  next_run TIMESTAMP NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_enabled (enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Firewall rules table
-CREATE TABLE IF NOT EXISTS firewall_rules (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  action ENUM('allow', 'deny') NOT NULL,
-  protocol ENUM('tcp', 'udp', 'icmp') DEFAULT 'tcp',
-  port INT,
-  ip_address VARCHAR(45),
-  direction ENUM('in', 'out') DEFAULT 'in',
-  description VARCHAR(255),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_action (action),
-  INDEX idx_port (port)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Activity logs table
-CREATE TABLE IF NOT EXISTS activity_logs (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  user_id INT,
-  action VARCHAR(100) NOT NULL,
-  resource_type VARCHAR(50),
-  resource_id INT,
-  details TEXT,
-  ip_address VARCHAR(45),
-  user_agent VARCHAR(255),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_user (user_id),
-  INDEX idx_created (created_at),
-  INDEX idx_action (action)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Create admin user (password: admin123 hashed with bcrypt)
 INSERT INTO users (username, email, password_hash, role, is_active) 
 VALUES ('admin', 'admin@localhost', '$2b$10$rQZ5YHj8KzX9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z', 'admin', true)
 ON DUPLICATE KEY UPDATE role='admin', is_active=true;
 EOF
 
-# Create log directories
-mkdir -p /var/log/panel
-chown panel:www-data /var/log/panel
-chmod 755 /var/log/panel
+# Создать скрипт ЗАПУСКА с защитой от OOM
+cat > /usr/local/bin/panel-safe-start <<'SAFE_EOF'
+#!/bin/bash
+set -e
 
-# Create backup directories
-mkdir -p /opt/panel/backups/{daily,weekly,monthly}
-chown -R panel:www-data /opt/panel/backups
-chmod -R 750 /opt/panel/backups
+echo "🔍 Checking available memory before panel start..."
+FREE_MEM=$(free -m | awk '/^Mem:/{print $7}')
+SWAP_FREE=$(free -m | awk '/^Swap:/{print $4}')
 
-echo "✓ Panel environment configured"
-echo "  Environment file: /opt/panel/backend/.env"
-echo "  PM2 config: /opt/panel/ecosystem.config.js"
-echo "  Database schema created"
+echo "   Free RAM: ${FREE_MEM}MB"
+echo "   Free Swap: ${SWAP_FREE}MB"
+
+if [ "$FREE_MEM" -lt 300 ]; then
+  echo "❌ CRITICAL: Less than 300MB free RAM. Stopping to prevent SSH lockout!"
+  echo "   Please stop some services first:"
+  echo "     sudo systemctl stop litespeed    # Stop OLS temporarily"
+  echo "     sudo systemctl stop mariadb      # Stop DB temporarily"
+  echo "   Then run: panel-safe-start"
+  exit 1
+fi
+
+if [ "$SWAP_FREE" -lt 500 ]; then
+  echo "⚠️  Low swap space (${SWAP_FREE}MB). Increasing swap to 2GB..."
+  if [ ! -f /swapfile2 ]; then
+    fallocate -l 2G /swapfile2
+    chmod 600 /swapfile2
+    mkswap /swapfile2
+    swapon /swapfile2
+    echo '/swapfile2 none swap sw 0 0' >> /etc/fstab
+  fi
+fi
+
+echo "✅ Memory check passed. Starting panel..."
+sudo -u panel pm2 start /opt/panel/backend/ecosystem.config.js
+sudo -u panel pm2 save
+
+echo ""
+echo "🚀 Panel started successfully!"
+echo "   Access: http://$(hostname -I | awk '{print $1}'):3000"
+echo ""
+echo "💡 If SSH disconnects:"
+echo "   1. Wait 2-3 minutes for system to stabilize"
+echo "   2. Reconnect via SSH"
+echo "   3. Check memory: free -h"
+echo "   4. Stop panel if needed: sudo -u panel pm2 stop all"
+SAFE_EOF
+
+chmod +x /usr/local/bin/panel-safe-start
+
+echo "✓ Panel environment configured SAFELY"
+echo "⚠️  DO NOT start panel automatically!"
+echo "✅ Use 'panel-safe-start' command to start with memory protection"

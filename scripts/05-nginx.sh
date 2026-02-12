@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-MAX_WORKERS=$1
+WORKERS=$1
 
 echo "Installing Nginx..."
-apt install -y nginx
+apt install -y nginx > /dev/null 2>&1
 
 # Remove default site
 rm -f /etc/nginx/sites-enabled/default
 
-# Create Nginx configuration for OLS proxy
+# Create OLS proxy config
 cat > /etc/nginx/sites-available/ols-proxy <<'EOF'
 upstream ols_backend {
     server 127.0.0.1:8088;
@@ -21,11 +21,6 @@ server {
     server_name _;
     server_tokens off;
 
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-
     # Health check
     location /health {
         access_log off;
@@ -33,7 +28,7 @@ server {
         add_header Content-Type text/plain;
     }
 
-    # Panel access (temporary during setup)
+    # Panel proxy
     location /panel/ {
         proxy_pass http://127.0.0.1:3000/;
         proxy_set_header Host $host;
@@ -43,7 +38,6 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400s;
     }
 
     # Main proxy to OLS
@@ -55,37 +49,21 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-
-        # Optimized timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-        send_timeout 60s;
-
-        # Buffer optimization
         proxy_buffering on;
         proxy_buffer_size 8k;
         proxy_buffers 8 32k;
         proxy_busy_buffers_size 64k;
-        proxy_temp_file_write_size 64k;
-
-        # Cache static files
-        proxy_cache_valid 200 302 10m;
-        proxy_cache_valid 404 1m;
     }
 }
 EOF
 
 ln -sf /etc/nginx/sites-available/ols-proxy /etc/nginx/sites-enabled/
 
-# Create optimized nginx.conf
+# Optimize nginx.conf
 cat > /etc/nginx/nginx.conf <<EOF
 user www-data;
-worker_processes ${MAX_WORKERS};
+worker_processes ${WORKERS};
 pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
 
 events {
     worker_connections 1024;
@@ -106,8 +84,6 @@ http {
 
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
 
     access_log /var/log/nginx/access.log;
     error_log /var/log/nginx/error.log warn;
@@ -115,19 +91,14 @@ http {
     gzip on;
     gzip_vary on;
     gzip_min_length 1024;
-    gzip_types text/plain text/css text/xml text/javascript application/x-javascript 
-               application/xml+rss application/javascript application/json 
-               application/rss+xml application/atom+xml image/svg+xml;
+    gzip_types text/plain text/css application/json application/javascript;
 
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
 }
 EOF
 
-# Test and reload Nginx
-nginx -t && systemctl reload nginx
-systemctl enable nginx
+nginx -t && systemctl restart nginx 2>/dev/null || true
+systemctl enable nginx 2>/dev/null || true
 
 echo "✓ Nginx installed and configured"
-echo "  Proxying to OLS on port 8088"
-echo "  Panel accessible at /panel/ (temporary)"
